@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LEGO Set Inventory — Advanced Tracker</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      margin: 24px;
+      line-height: 1.45;
+    }
+    header { display: grid; gap: 12px; margin-bottom: 14px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+    input[type="text"], input[type="search"] {
+      padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px;
+    }
+    input[type="file"] {
+      border: 1px dashed #bbb; padding: 8px; border-radius: 8px; background: #fff;
+    }
+    .btn {
+      cursor: pointer; border: 1px solid #ccc; background: #fff;
+      border-radius: 8px; padding: 8px 12px; font-weight: 600;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .chip { padding: 2px 8px; border: 1px solid #ddd; border-radius: 999px; font-size: 12px; background: #fff; }
+    .muted { color:#666; } .small { font-size: 12px; }
+    .statbar { display:flex; gap:12px; flex-wrap:wrap; margin: 8px 0 0; }
+    .stat { padding: 8px 12px; border:1px solid #ddd; background:#fafafa; border-radius:8px; font-weight:600; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    thead th {
+      position: sticky; top: 0; z-index: 1;
+      background: #f3f4f6; border-bottom: 2px solid #ddd;
+      text-align: left; padding: 8px; white-space: nowrap;
+      user-select: none;
+    }
+    thead th .sort { margin-left: 6px; font-size: 11px; color:#666; opacity:.8; }
+    tbody td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: middle; }
+    tfoot td { font-weight: 700; padding: 10px 8px; border-top: 2px solid #ddd; background: #fafafa; }
+
+    .imgcell { width: 56px; text-align: center; }
+    .imgcell img { width: 48px; height: 48px; object-fit: contain; background: #fff; border: 1px solid #eee; border-radius: 6px; cursor: zoom-in; }
+    .qty-cell, .remain-cell, .act-cell { text-align: right; white-space: nowrap; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .actions { display: inline-flex; gap: 6px; align-items: center; }
+    .row-found { background: #f0fff4; }
+
+    /* Draggable columns */
+    th[draggable="true"] { cursor: grab; }
+    th.dragging { opacity: .5; }
+
+    /* Color swatch */
+    .swatch {
+      display:inline-block; width: 16px; height: 16px; border-radius: 3px; border:1px solid #ddd;
+      margin-right: 8px; vertical-align: text-bottom;
+      background: repeating-conic-gradient(#f8f8f8 0% 25%, #eaeaea 0% 50%) 50% / 12px 12px; /* fallback checker */
+    }
+
+    /* Zoom modal */
+    .modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,.65);
+      display: none; align-items: center; justify-content: center;
+      z-index: 9999; padding: 24px;
+    }
+    .modal.open { display: flex; }
+    .modal img {
+      max-width: 92vw; max-height: 92vh; border-radius: 10px; background: #fff;
+      box-shadow: 0 10px 30px rgba(0,0,0,.4); cursor: zoom-out;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <input id="setId" type="text" placeholder="Set ID (e.g. 17101-1)" />
+      <button id="openCsv" class="btn">Open CSV for Set</button>
+      <span class="small muted">Opens Brickset CSV in a new tab: https://brickset.com/inventories/&lt;SET&gt;/csv</span>
+    </div>
+    <div class="row">
+      <input id="csvFile" type="file" accept=".csv,text/csv" />
+      <button id="saveJson" class="btn" disabled>Export JSON</button>
+      <label class="btn" for="importJsonFile">Import JSON</label>
+      <input id="importJsonFile" type="file" accept="application/json,.json" style="display:none" />
+      <button id="resetProgress" class="btn" disabled>Reset</button>
+      <input id="search" type="search" placeholder="Filter name/part/color…" />
+      <label class="chip"><input id="hideFound" type="checkbox"/> Hide 0 remaining</label>
+    </div>
+    <div class="statbar">
+      <div class="stat">Total required: <span id="sTotal">0</span></div>
+      <div class="stat">Remaining: <span id="sRemain">0</span></div>
+      <div class="stat">Unique items: <span id="sUnique">0</span></div>
+      <div class="stat">Visible: <span id="sVisible">0</span></div>
+    </div>
+  </header>
+
+  <table id="partsTable">
+    <thead><tr id="theadRow"></tr></thead>
+    <tbody></tbody>
+    <tfoot>
+      <tr>
+        <td id="tf0"></td><td id="tf1"></td><td id="tf2" class="qty-cell">0</td>
+        <td id="tf3" class="remain-cell">0</td><td id="tf4"></td><td id="tf5"></td><td id="tf6"></td><td id="tf7"></td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div id="zoomModal" class="modal" aria-hidden="true"><img id="zoomImg" alt="Zoomed image"/></div>
+
+<script>
+// ---------- helpers ----------
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l=>l.trim().length);
+  if (!lines.length) return { headers: [], rows: [] };
+  const split = line => { let out=[],c='',q=false; for(let i=0;i<line.length;i++){let ch=line[i];
+    if(ch=='"'){ if(q && line[i+1]=='"'){c+='"';i++;} else q=!q; }
+    else if(ch==','&&!q){ out.push(c);c=''; } else c+=ch;
+  } out.push(c); return out; };
+  return { headers: split(lines[0]).map(h=>h.toLowerCase()), rows: lines.slice(1).map(split) };
+}
+
+function uid(r){ return [r.design||'', r.color||'', r.name||''].join(':'); }
+
+function imgUrls(eid){
+  const id=(eid||'').toString().trim(); if(!id) return [];
+  return [
+    `https://www.lego.com/cdn/product-assets/element.img.lod5photo.192x192/${id}.jpg`,
+    `https://images.brickset.com/parts/${id}.jpg`,
+    `https://cdn.rebrickable.com/media/parts/elements/${id}.jpg`
+  ];
+}
+
+// LEGO-ish palette mapping (best-effort). Unknown -> neutral checker.
+const COLOR_MAP = {
+  "black":"#111111","white":"#f8f8f8","red":"#c91a09","blue":"#0055bf","yellow":"#f2cd37","green":"#237841",
+  "light bluish gray":"#a3a2a4","dark bluish gray":"#6c6e68","light gray":"#c1c1c1","dark gray":"#6d6e5c",
+  "tan":"#e4cd9e","dark tan":"#958a73","brown":"#6e3b0c","dark brown":"#4b2e1f","reddish brown":"#582a12",
+  "orange":"#f57d31","bright light orange":"#f8bb3d","medium nougat":"#aa7d55","nougat":"#d09168",
+  "dark red":"#720e0f","dark blue":"#0a3463","medium blue":"#6ea9ff","sand blue":"#6074a1","sand green":"#789f90",
+  "lime":"#a6ca4b","dark green":"#184632","dk green":"#184632","bright green":"#4b9f4a",
+  "trans-clear":"#e6f2ff","trans-black":"#4c5866","trans-red":"#ff6655","trans-blue":"#8fbce6","trans-light blue":"#c2e0ff",
+  "trans-yellow":"#fff16e","trans-green":"#9adf88","trans-neon green":"#c0ff00","trans-orange":"#ffb146","trans-dark blue":"#3c6db5",
+  "pearl gold":"#aa7f2e","gold":"#d4af37","flat silver":"#8e8e8e","metallic silver":"#a5a5a5","dark pearl gray":"#6d6e68",
+  "magenta":"#923978","dark purple":"#3f3696","purple":"#6b3fa0","pink":"#f5a3c7","medium lavender":"#9391e4","lavender":"#cda4de",
+  "dark orange":"#a95500","bright light yellow":"#fff0a4","sand yellow":"#9c8463","sand red":"#91574b","azure":"#4fbed6",
+  "medium azure":"#36aebf","dark azure":"#0074b9","coral":"#ff6f6f","satin trans-clear":"#f0f0f0"
+};
+function resolveColorHex(name){
+  if(!name) return null;
+  const key = name.toLowerCase().trim();
+  if (COLOR_MAP[key]) return COLOR_MAP[key];
+  // try stripping extra words
+  const simple = key.replace(/[^a-z\s-]/g,'').replace(/\s+/g,' ').trim();
+  if (COLOR_MAP[simple]) return COLOR_MAP[simple];
+  return null;
+}
+
+// ---------- state ----------
+const STORAGE_KEY='lego-set-progress';
+const state={
+  rows:[], // {index, qty, remain, name, design, element, color}
+  sort:{key:'#',dir:'asc'},
+  columns:[
+    {key:'#',label:'#',numeric:true,draggable:true,sortable:true},
+    {key:'image',label:'Image',sortable:false,draggable:true},
+    {key:'qty',label:'Qty',numeric:true,sortable:true,draggable:true},
+    {key:'remain',label:'Remaining',numeric:true,sortable:true,draggable:true},
+    {key:'actions',label:'Adjust',sortable:false,draggable:true},
+    {key:'part',label:'Part',sortable:true,draggable:true},
+    {key:'element',label:'Element',numeric:true,sortable:true,draggable:true},
+    {key:'color',label:'Color',sortable:true,draggable:true}
+  ]
+};
+
+// ---------- header / columns ----------
+function buildThead(){
+  const tr=$('#theadRow'); tr.innerHTML='';
+  state.columns.forEach((c,i)=>{
+    const th=document.createElement('th'); th.textContent=c.label; th.dataset.key=c.key;
+    if(c.sortable){ const s=document.createElement('span'); s.className='sort';
+      s.textContent=state.sort.key===c.key?(state.sort.dir==='asc'?'▲':'▼'):'↕';
+      th.appendChild(s); th.style.cursor='pointer';
+      th.onclick=()=>{ if(th.classList.contains('dragging')) return;
+        if(state.sort.key===c.key) state.sort.dir=state.sort.dir==='asc'?'desc':'asc';
+        else {state.sort.key=c.key; state.sort.dir='asc';}
+        render();
+      };
+    }
+    th.draggable=true;
+    th.ondragstart=e=>{e.dataTransfer.setData('text/plain',i); th.classList.add('dragging');};
+    th.ondragend=()=>th.classList.remove('dragging');
+    th.ondragover=e=>e.preventDefault();
+    th.ondrop=e=>{e.preventDefault();
+      const from=+e.dataTransfer.getData('text/plain'); const to=i;
+      if(from!==to){ const moved=state.columns.splice(from,1)[0]; state.columns.splice(to,0,moved); buildThead(); render(); }
+    };
+    tr.appendChild(th);
+  });
+}
+
+// ---------- rendering ----------
+function imgCandidates(eid){
+  const id=(eid||'').toString().trim(); if(!id) return [];
+  return [
+    `https://www.lego.com/cdn/product-assets/element.img.lod5photo.192x192/${id}.jpg`,
+    `https://images.brickset.com/parts/${id}.jpg`,
+    `https://cdn.rebrickable.com/media/parts/elements/${id}.jpg`
+  ];
+}
+function render(){
+  buildThead();
+  const tbody=$('#partsTable tbody'); tbody.innerHTML='';
+
+  // order & filter
+  const search = ($('#search').value||'').toLowerCase();
+  const hideFound = $('#hideFound').checked;
+  let rows = state.rows.filter(r=>{
+    const hit=(r.name+' '+r.color+' '+r.design+' '+r.element).toLowerCase().includes(search);
+    const ok=!(hideFound && r.remain<=0);
+    return hit && ok;
+  });
+
+  // sort
+  rows.sort((a,b)=>{
+    const k=state.sort.key, dir=state.sort.dir==='asc'?1:-1;
+    const numKeys=['#','qty','remain','element'];
+    let va, vb;
+    if(k==='#'){ va=a.index; vb=b.index; }
+    else if(numKeys.includes(k)){ va=+a[k]||0; vb=+b[k]||0; }
+    else if(k==='part'){ va=(a.name+' '+a.design).toLowerCase(); vb=(b.name+' '+b.design).toLowerCase(); }
+    else { va=(a[k]??'').toString().toLowerCase(); vb=(b[k]??'').toString().toLowerCase(); }
+    if(typeof va==='number' && typeof vb==='number') return (va-vb)*dir;
+    return (''+va).localeCompare(''+vb)*dir;
+  });
+
+  // totals
+  let vis=0, tQty=0, tRem=0;
+
+  rows.forEach(r=>{
+    vis++; tQty+=+r.qty||0; tRem+=+r.remain||0;
+    const tr=document.createElement('tr'); if(r.remain<=0) tr.classList.add('row-found');
+
+    state.columns.forEach(col=>{
+      const td=document.createElement('td');
+      switch(col.key){
+        case '#': td.textContent=r.index; break;
+        case 'image': {
+          td.className='imgcell';
+          const img=document.createElement('img'); img.alt=''; img.dataset.i=0;
+          const urls=imgCandidates(r.element);
+          const load=()=>{const i=+img.dataset.i; if(i>=urls.length){img.style.display='none';return;} img.src=urls[i];};
+          img.onerror=()=>{img.dataset.i=+img.dataset.i+1; load();};
+          img.onclick=()=>{const m=$('#zoomModal'); const zi=$('#zoomImg'); zi.src=img.src; m.classList.add('open');};
+          load(); td.appendChild(img);
+        } break;
+        case 'qty': td.className='qty-cell'; td.textContent=r.qty; break;
+        case 'remain': td.className='remain-cell'; td.textContent=r.remain; break;
+        case 'actions':
+          td.className='act-cell';
+          td.innerHTML = `
+            <div class="actions">
+              <button class="btn dec" data-u="${uid(r)}">−</button>
+              <button class="btn inc" data-u="${uid(r)}">+</button>
+              <button class="btn zero" data-u="${uid(r)}" title="Mark complete">✓</button>
+            </div>`;
+          break;
+        case 'part':
+          td.innerHTML = `${r.name} <span class="chip mono">${r.design||''}</span>`; break;
+        case 'element': td.className='mono'; td.textContent=r.element||''; break;
+        case 'color': {
+          const wrap=document.createElement('div');
+          const sw=document.createElement('span'); sw.className='swatch';
+          const hex=resolveColorHex(r.color);
+          if (hex) { sw.style.background=hex; }
+          wrap.appendChild(sw);
+          const txt=document.createElement('span'); txt.textContent=r.color||'';
+          wrap.appendChild(txt);
+          td.appendChild(wrap);
+        } break;
+      }
+      tbody.appendChild(tr).appendChild(td);
+    });
+  });
+
+  $('#sVisible').textContent=vis;
+  $('#sTotal').textContent=state.rows.reduce((s,r)=>s+(+r.qty||0),0);
+  $('#sRemain').textContent=state.rows.reduce((s,r)=>s+(+r.remain||0),0);
+  $('#sUnique').textContent=state.rows.length;
+
+  // footer totals
+  $('#tf2').textContent=tQty;
+  $('#tf3').textContent=tRem;
+
+  const has = state.rows.length>0;
+  $('#saveJson').disabled = !has;
+  $('#resetProgress').disabled = !has;
+}
+
+// ---------- events ----------
+document.body.addEventListener('click', e=>{
+  if (e.target.id==='zoomModal') { e.target.classList.remove('open'); return; }
+  if (e.target.classList.contains('dec') || e.target.classList.contains('inc') || e.target.classList.contains('zero')) {
+    const u=e.target.dataset.u; const r=state.rows.find(x=>uid(x)===u); if(!r) return;
+    if (e.target.classList.contains('dec')) r.remain=Math.max(0, r.remain-1);
+    if (e.target.classList.contains('inc')) r.remain=Math.min(r.qty, r.remain+1);
+    if (e.target.classList.contains('zero')) r.remain=0;
+    const map=Object.fromEntries(state.rows.map(x=>[uid(x),x.remain]));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+    render();
+  }
+});
+
+// open CSV for set
+$('#openCsv').addEventListener('click', ()=>{
+  const id = ($('#setId').value||'').trim();
+  if (!id) { alert('Enter a set ID, e.g., 17101-1'); return; }
+  window.open(`https://brickset.com/inventories/${encodeURIComponent(id)}/csv`, '_blank');
+});
+
+// CSV upload
+$('#csvFile').addEventListener('change', ev=>{
+  const f=ev.target.files?.[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>handleCSV(String(rd.result||'')); rd.readAsText(f);
+});
+
+// search + hide found
+$('#search').addEventListener('input', ()=>render());
+$('#hideFound').addEventListener('change', ()=>render());
+
+// export/import JSON
+$('#saveJson').addEventListener('click', ()=>{
+  const payload = { rows: state.rows };
+  const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href:url, download:'lego-set-progress.json' });
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+});
+$('#importJsonFile').addEventListener('change', ev=>{
+  const f=ev.target.files?.[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    try{
+      const j = JSON.parse(String(rd.result||'{}'));
+      if (j && Array.isArray(j.rows)) {
+        const map = Object.fromEntries(state.rows.map(x=>[uid(x),x.remain]));
+        let merged=0;
+        j.rows.forEach(ir=>{
+          const key = uid(ir);
+          const idx = state.rows.findIndex(x=>uid(x)===key);
+          if (idx>=0) {
+            const qty = +state.rows[idx].qty || 0;
+            const newRemain = Math.max(0, Math.min(qty, +ir.remain||0));
+            state.rows[idx].remain = newRemain;
+            map[uid(state.rows[idx])] = newRemain;
+            merged++;
+          }
+        });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+        render();
+        alert(`Imported progress merged for ${merged} item(s).`);
+      } else {
+        alert('Invalid JSON. Expected: { "rows": [ { name,color,qty,remain,design,element }, ... ] }');
+      }
+    }catch(_){ alert('Invalid JSON file.'); }
+  };
+  rd.readAsText(f);
+});
+$('#resetProgress').addEventListener('click', ()=>{
+  if (!confirm('Reset saved progress? Remaining = Qty for all rows.')) return;
+  state.rows.forEach(r=> r.remain = +r.qty || 0);
+  const map=Object.fromEntries(state.rows.map(x=>[uid(x),x.remain]));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+  render();
+});
+
+// ---------- CSV handling ----------
+function handleCSV(text){
+  const { headers, rows } = parseCSV(text);
+  // best-effort header matching
+  const find = (names) => headers.findIndex(h => names.some(n => h.trim()===n.toLowerCase()));
+  const qtyIdx = find(['qty','quantity']);
+  const colorIdx = find(['colour','color']);
+  const designIdx = find(['design','design id','designid']);
+  const elementIdx = find(['element','element id','elementid']);
+  const nameIdx = find(['element name','name','part','part name','description','elementname']);
+
+  const missing = [];
+  if (qtyIdx<0) missing.push('Qty');
+  if (colorIdx<0) missing.push('Color/Colour');
+  if (designIdx<0) missing.push('Design');
+  if (elementIdx<0) missing.push('Element');
+  if (nameIdx<0) missing.push('Name/Part');
+  if (missing.length){
+    alert("Couldn't find required columns in the CSV. Missing: " + missing.join(', '));
+    return;
+  }
+
+  // load saved map
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}'); } catch(_) {}
+
+  state.rows = rows.map((r,i)=>{
+    const qty = +r[qtyIdx] || 0;
+    const name = (r[nameIdx]||'').trim();
+    const color = (r[colorIdx]||'').trim();
+    const design = (r[designIdx]||'').trim();
+    const element = (r[elementIdx]||'').trim();
+    const remain = (saved[ [design,color,name].join(':') ] ?? qty);
+    return { index:i+1, qty, remain: Math.max(0, Math.min(qty, +remain||0)), name, color, design, element };
+  });
+
+  render();
+}
+
+// init
+render();
+</script>
+</body>
+</html>

@@ -79,9 +79,9 @@
     </div>
     <div class="row">
       <input id="csvFile" type="file" accept=".csv,text/csv" />
-      <button id="saveJson" class="btn" disabled>Export JSON</button>
-      <label class="btn" for="importJsonFile">Import JSON</label>
-      <input id="importJsonFile" type="file" accept="application/json,.json" style="display:none" />
+      <button id="saveJson" class="btn" disabled>Export</button>
+      <label class="btn" for="importJsonFile">Import</label>
+      <input id="importJsonFile" type="file" accept=".dat,.json,application/json,application/octet-stream" style="display:none" />
       <button id="resetProgress" class="btn" disabled>Reset</button>
       <input id="search" type="search" placeholder="Filter name/part/color…" />
       <label class="chip"><input id="hideFound" type="checkbox"/> Hide 0 remaining</label>
@@ -331,20 +331,53 @@ $('#csvFile').addEventListener('change', ev=>{
 $('#search').addEventListener('input', ()=>render());
 $('#hideFound').addEventListener('change', ()=>render());
 
-// export/import JSON
+// export/import (iPad Safari compatible)
 $('#saveJson').addEventListener('click', ()=>{
   const payload = { rows: state.rows };
-  const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+  const jsonStr = JSON.stringify(payload, null, 2);
+  const blob = new Blob([jsonStr], {type:'application/octet-stream'});
   const url = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement('a'), { href:url, download:'lego-set-progress.json' });
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+
+  // Try modern download approach first
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'lego-progress.dat';
+
+  // For iPad Safari: open in new tab if download attribute not supported
+  if (typeof a.download === 'undefined' || /iPad|iPhone|iPod/.test(navigator.userAgent)) {
+    // Open data URL in new window for manual save
+    const win = window.open('', '_blank');
+    if (win) {
+      win.document.write('<html><head><title>Save as lego-progress.dat</title></head><body>');
+      win.document.write('<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:monospace;">');
+      win.document.write(jsonStr.replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+      win.document.write('</pre></body></html>');
+      win.document.close();
+      alert('Use Share > Save to Files to save as "lego-progress.dat"');
+    } else {
+      alert('Pop-up blocked. Please allow pop-ups and try again.');
+    }
+    URL.revokeObjectURL(url);
+    return;
+  }
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 });
 $('#importJsonFile').addEventListener('change', ev=>{
   const f=ev.target.files?.[0]; if(!f) return;
   const rd=new FileReader();
   rd.onload=()=>{
+    // Reset input so same file can be selected again (iPad Safari fix)
+    ev.target.value = '';
+
     try{
-      const j = JSON.parse(String(rd.result||'{}'));
+      const text = String(rd.result||'').trim();
+      if (!text) { alert('File is empty.'); return; }
+
+      const j = JSON.parse(text);
       if (j && Array.isArray(j.rows)) {
         const map = Object.fromEntries(state.rows.map(x=>[uid(x),x.remain]));
         let merged=0;
@@ -363,9 +396,13 @@ $('#importJsonFile').addEventListener('change', ev=>{
         render();
         alert(`Imported progress merged for ${merged} item(s).`);
       } else {
-        alert('Invalid JSON. Expected: { "rows": [ { name,color,qty,remain,design,element }, ... ] }');
+        alert('Invalid file format. Expected: { "rows": [...] }');
       }
-    }catch(_){ alert('Invalid JSON file.'); }
+    }catch(e){ alert('Could not parse file: ' + e.message); }
+  };
+  rd.onerror = ()=> {
+    ev.target.value = '';
+    alert('Error reading file. Please try again.');
   };
   rd.readAsText(f);
 });

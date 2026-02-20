@@ -366,9 +366,57 @@ $('#saveJson').addEventListener('click', ()=>{
   a.remove();
   URL.revokeObjectURL(url);
 });
+// Helper to sanitize broken JSON (fixes newlines in strings, missing commas)
+function sanitizeJSON(text) {
+  // Fix newlines inside quoted strings (common in webarchive)
+  // Replace newlines between quotes with spaces
+  let result = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) {
+      result += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      result += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+    if (inString && (ch === '\n' || ch === '\r')) {
+      result += ' '; // Replace newlines in strings with space
+      continue;
+    }
+    result += ch;
+  }
+
+  // Fix missing commas: }"  or ]"  should be },"  or ],"
+  result = result.replace(/"\s*\n\s*"/g, '",\n"');
+  result = result.replace(/(\d)\s*\n\s*"/g, '$1,\n"');
+  result = result.replace(/"\s*"/g, '","');
+
+  return result;
+}
+
 // Helper to extract JSON from text (handles webarchive and other formats)
 function extractJSON(text) {
+  // Sanitize first
+  const sanitized = sanitizeJSON(text);
+
   // Try direct parse first
+  try {
+    const j = JSON.parse(sanitized.trim());
+    if (j && Array.isArray(j.rows)) return j;
+  } catch(_) {}
+
+  // Also try original text
   try {
     const j = JSON.parse(text.trim());
     if (j && Array.isArray(j.rows)) return j;
@@ -382,7 +430,7 @@ function extractJSON(text) {
   ];
 
   for (const pattern of patterns) {
-    const matches = text.match(pattern);
+    const matches = sanitized.match(pattern);
     if (matches) {
       for (const match of matches) {
         try {
@@ -396,18 +444,18 @@ function extractJSON(text) {
   }
 
   // Try to find rows array anywhere in binary/text content
-  const rowsMatch = text.match(/"rows"\s*:\s*\[/);
+  const rowsMatch = sanitized.match(/"rows"\s*:\s*\[/);
   if (rowsMatch) {
-    const startIdx = text.lastIndexOf('{', rowsMatch.index);
+    const startIdx = sanitized.lastIndexOf('{', rowsMatch.index);
     if (startIdx >= 0) {
       // Try to find matching closing brace
       let depth = 0, endIdx = startIdx;
-      for (let i = startIdx; i < text.length && i < startIdx + 500000; i++) {
-        if (text[i] === '{') depth++;
-        else if (text[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+      for (let i = startIdx; i < sanitized.length && i < startIdx + 500000; i++) {
+        if (sanitized[i] === '{') depth++;
+        else if (sanitized[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
       }
       try {
-        const j = JSON.parse(text.slice(startIdx, endIdx));
+        const j = JSON.parse(sanitized.slice(startIdx, endIdx));
         if (j && Array.isArray(j.rows)) return j;
       } catch(_) {}
     }

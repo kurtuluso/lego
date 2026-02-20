@@ -81,7 +81,7 @@
       <input id="csvFile" type="file" accept=".csv,text/csv" />
       <button id="saveJson" class="btn" disabled>Export</button>
       <label class="btn" for="importJsonFile">Import</label>
-      <input id="importJsonFile" type="file" accept=".dat,.json,application/json,application/octet-stream" style="display:none" />
+      <input id="importJsonFile" type="file" accept=".dat,.json,.webarchive,application/json,application/octet-stream" style="display:none" />
       <button id="resetProgress" class="btn" disabled>Reset</button>
       <input id="search" type="search" placeholder="Filter name/part/color…" />
       <label class="chip"><input id="hideFound" type="checkbox"/> Hide 0 remaining</label>
@@ -366,6 +366,104 @@ $('#saveJson').addEventListener('click', ()=>{
   a.remove();
   URL.revokeObjectURL(url);
 });
+// Helper to sanitize broken JSON (fixes newlines in strings, missing commas)
+function sanitizeJSON(text) {
+  // Fix newlines inside quoted strings (common in webarchive)
+  // Replace newlines between quotes with spaces
+  let result = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) {
+      result += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      result += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+    if (inString && (ch === '\n' || ch === '\r')) {
+      result += ' '; // Replace newlines in strings with space
+      continue;
+    }
+    result += ch;
+  }
+
+  // Fix missing commas: }"  or ]"  should be },"  or ],"
+  result = result.replace(/"\s*\n\s*"/g, '",\n"');
+  result = result.replace(/(\d)\s*\n\s*"/g, '$1,\n"');
+  result = result.replace(/"\s*"/g, '","');
+
+  return result;
+}
+
+// Helper to extract JSON from text (handles webarchive and other formats)
+function extractJSON(text) {
+  // Sanitize first
+  const sanitized = sanitizeJSON(text);
+
+  // Try direct parse first
+  try {
+    const j = JSON.parse(sanitized.trim());
+    if (j && Array.isArray(j.rows)) return j;
+  } catch(_) {}
+
+  // Also try original text
+  try {
+    const j = JSON.parse(text.trim());
+    if (j && Array.isArray(j.rows)) return j;
+  } catch(_) {}
+
+  // Search for embedded JSON (webarchive, etc.)
+  // Look for {"rows": pattern and extract the JSON object
+  const patterns = [
+    /\{\s*"rows"\s*:\s*\[[\s\S]*?\]\s*\}/g,
+    /\{\s*&quot;rows&quot;\s*:\s*\[[\s\S]*?\]\s*\}/g
+  ];
+
+  for (const pattern of patterns) {
+    const matches = sanitized.match(pattern);
+    if (matches) {
+      for (const match of matches) {
+        try {
+          // Decode HTML entities if present
+          const decoded = match.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+          const j = JSON.parse(decoded);
+          if (j && Array.isArray(j.rows) && j.rows.length > 0) return j;
+        } catch(_) {}
+      }
+    }
+  }
+
+  // Try to find rows array anywhere in binary/text content
+  const rowsMatch = sanitized.match(/"rows"\s*:\s*\[/);
+  if (rowsMatch) {
+    const startIdx = sanitized.lastIndexOf('{', rowsMatch.index);
+    if (startIdx >= 0) {
+      // Try to find matching closing brace
+      let depth = 0, endIdx = startIdx;
+      for (let i = startIdx; i < sanitized.length && i < startIdx + 500000; i++) {
+        if (sanitized[i] === '{') depth++;
+        else if (sanitized[i] === '}') { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+      }
+      try {
+        const j = JSON.parse(sanitized.slice(startIdx, endIdx));
+        if (j && Array.isArray(j.rows)) return j;
+      } catch(_) {}
+    }
+  }
+
+  return null;
+}
+
 $('#importJsonFile').addEventListener('change', ev=>{
   const f=ev.target.files?.[0]; if(!f) return;
   const rd=new FileReader();
@@ -374,10 +472,10 @@ $('#importJsonFile').addEventListener('change', ev=>{
     ev.target.value = '';
 
     try{
-      const text = String(rd.result||'').trim();
-      if (!text) { alert('File is empty.'); return; }
+      const text = String(rd.result||'');
+      if (!text.trim()) { alert('File is empty.'); return; }
 
-      const j = JSON.parse(text);
+      const j = extractJSON(text);
       if (j && Array.isArray(j.rows)) {
         const map = Object.fromEntries(state.rows.map(x=>[uid(x),x.remain]));
         let merged=0;
@@ -396,7 +494,7 @@ $('#importJsonFile').addEventListener('change', ev=>{
         render();
         alert(`Imported progress merged for ${merged} item(s).`);
       } else {
-        alert('Invalid file format. Expected: { "rows": [...] }');
+        alert('Could not find valid data in file. Expected: { "rows": [...] }');
       }
     }catch(e){ alert('Could not parse file: ' + e.message); }
   };
